@@ -1,123 +1,172 @@
-from selenium.webdriver.common.keys import Keys
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import NoSuchElementException
-import time
-import pandas as pd
-import csv
+from RPA.Browser.Selenium import Selenium
+from RPA.Excel.Files import Files
+from RPA.PDF import PDF
+import os
 import re
+import time
+
+FILES = "output" 
+URL = "https://itdashboard.gov/"  
+XLS_AGENCY = "Agencies"  
+XLS_TABLE = "Table"  
+BUTTON = "DIVE IN"  
+OPEN_AGENCY = 0 
 
 
-driver = webdriver.Chrome()
-driver.get("https://itdashboard.gov/")
+class Dashboard:
+    uii_links = []
+    headers = []
+    agencies_data = []
+    investment_table = {}
 
-try:
-    main = WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.XPATH, "//a[contains(.,'DIVE IN')]"))
-    )
-    main.click()
+    def __init__(self, url):
+        self.browser = Selenium()
+        self.lib = Files()
+        self.pdf = PDF()
+        self.browser.set_download_directory(os.path.join(os.getcwd(), f"{FILES}/"))
+        self.browser.open_available_browser(url)
 
-except:
-     driver.quit()
-     
-agency_list=driver.find_element_by_xpath("//*[@id='agency-tiles-widget']/div").text
+    def click_dive_in(self, keyword):
+        self.browser.wait_until_page_contains(keyword)
+        self.browser.find_element('//a[@class="btn btn-default btn-lg-2x trend_sans_oneregular"]').click()
+
+    def find_agencies(self):
+        time.sleep(5)
+        agencies = self.browser.find_elements('//div[@id="agency-tiles-widget"]//div[@class="col-sm-4 text-center noUnderline"]')
+        found_agencies = []
+        amounts = []
+        for agency in agencies:
+            agency_split = agency.text.split("\n")
+            found_agencies.append(agency_split[0])
+            amounts.append(agency_split[2])
+        self.agencies_data = {'Agency': found_agencies, 'Amount': amounts}
+
+    def agency_to_xls(self, filename):
+      
+        w = self.lib.create_workbook(f"{FILES}/{filename}.xlsx")
+        w.append_worksheet("Sheet", self.agencies_data)
+        w.save()
+
+    def table_header(self):
+        while True:
+            try:
+                all_heads = self.browser.find_element(
+                    '//table[@class="datasource-table usa-table-borderless dataTable no-footer"]').find_element_by_tag_name(
+                    "thead").find_elements_by_tag_name("tr")[1].find_elements_by_tag_name("th")
+                if all_heads:
+                    break
+            except:
+                time.sleep(1)
+        for head in all_heads:
+            self.headers.append(head.text)
+
+    def click_uii_links(self):
+        tr_elements = self.browser.find_elements('//tr[@role="row"]')
+        for tr_element in tr_elements[2:]:
+            td_elements = tr_element.find_elements_by_tag_name('td')
+            try:
+                a_element = tr_element.find_element_by_tag_name('a').get_attribute("href")
+            except:
+                a_element = ''
+            if a_element:
+                self.uii_links.append(
+                    {"link": a_element, "investment_title": td_elements[2].text, "uii": td_elements[0].text}
+                )
+
+    def open_agency(self, agency_number):
+
+        self.browser.find_elements(
+            '//div[@id="agency-tiles-widget"]//div[@class="col-sm-4 text-center noUnderline"]//div[@class="row top-gutter-20"]//div[@class="col-sm-12"]')[
+            agency_number].click()
+        self.table_header()
+        for head in self.headers:
+            self.investment_table[head] = []
+        while True:
+            current_label = self.browser.find_element("investments-table-object_info").text
+            all_rows = self.browser.find_element("investments-table-object").find_element_by_tag_name(
+                "tbody").find_elements_by_tag_name("tr")
+            for row in all_rows:
+                for i, data in enumerate(row.find_elements_by_tag_name("td")):
+                    try:
+                        self.investment_table[self.headers[i]].append(data.text)
+                    except:
+                        self.investment_table[self.headers[i]].append("")
+            self.click_uii_links()
+            if self.browser.find_element('investments-table-object_next').get_attribute(
+                    "class") == 'paginate_button next disabled':
+                break
+            else:
+                self.browser.find_element('investments-table-object_next').click()
+                while True:
+                    if current_label != self.browser.find_element("investments-table-object_info").text:
+                        break
+                    time.sleep(1)
+
+    def investment_to_excel(self, filename):
+        w = self.lib.create_workbook(f"{FILES}/{filename}.xlsx")
+        w.append_worksheet("Sheet", self.investment_table)
+        w.save()
+
+    def download_pdf(self):
+        for url in self.uii_links:
+            self.browser.go_to(url["link"])
+            flag_time = time.time() + 10
+            while True:
+                try:
+                    if flag_time <= time.time():
+                        break
+                    pdf_link = self.browser.find_element('//*[contains(@id,"business-case-pdf")]//a').get_attribute("href")
+                    if pdf_link:
+                        self.browser.find_element('//div[@id="business-case-pdf"]').click()
+                        while True:
+                            try:
+                                time.sleep(2)
+                                if self.browser.find_element('//div[@id="business-case-pdf"]').find_element_by_tag_name("span"):
+                                    time.sleep(1)
+                                else:
+                                    break
+                            except:
+                                if self.browser.find_element('//*[contains(@id,"business-case-pdf")]//a[@aria-busy="false"]'):
+                                    time.sleep(1)
+                                    break
+                        break
+                except:
+                    time.sleep(1)
+
+    def compare_pdf_with_title(self):
+        self.browser.go_to(URL)
+        for link_item in self.uii_links:
+            try:
+                file_name = f'output/{link_item["uii"]}.pdf'
+                new_text = self.pdf.get_text_from_pdf(file_name, 1)
+                new_string = re.split(r'Bureau:|Section B', new_text[1])[1]
+                investment_title = re.split(r'Name of this Investment|2.', new_string)[1].replace(': ', '')
+                uii_text = re.split(r'Name of this Investment|2.', new_string)[2].replace(
+                    ' Unique Investment Identifier (UII): ', '')
+                if link_item["uii"] == uii_text:
+                    print(f'Unique Investment Identifier (UII): {link_item["uii"]} found in PDF ({file_name}).')
+                if link_item["investment_title"] == investment_title:
+                    print(f'Name of this Investment: {link_item["investment_title"]} found in PDF ({file_name}).')
+            except:
+                pass
+
+    def close_all_browsers(self):
+        self.browser.close_all_browsers()
 
 
-#dynamic agencies
-list=[]
-time.sleep(10)
-numberOfRows = len(driver.find_elements_by_xpath('//*[@id="agency-tiles-widget"]/div/div'))
-for iRow in range(numberOfRows):
-    # print(iRow)
- 
-        numberOfColumns = driver.find_elements_by_xpath('//*[@id="agency-tiles-widget"]/div/div['+str(iRow+1)+']/div')
-        for i in range(len(numberOfColumns)):
-            class WebElement(object):
-             content=numberOfColumns[i]
-             agency = WebDriverWait(content, 10).until(
-                 EC.presence_of_element_located((By.XPATH, './div/div/div/div[1]/a/span[1]'))
-     )
-             print(agency.text)
-             amount = WebDriverWait(content, 10).until(
-                 EC.presence_of_element_located((By.XPATH, './div/div/div/div[1]/a/span[2]'))
-     )
-             print(amount.text)
-             
-             Table_dict={ 'Agency': agency.text,
-                    'Amount': amount.text} 
-             list.append(Table_dict) 
-             df = pd.DataFrame(list)
-     
-  
-             df.to_csv('agencies1.csv') 
+if not os.path.exists(FILES):
+    os.mkdir(FILES)
 
 
-#table 
-try:
-    element = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.XPATH, '//*[@id="bs-example-navbar-collapse-1"]/ul[2]/li[1]/a'))
-    )
-    element.click()
-    element = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.LINK_TEXT, "National Science Foundation"))
-    )
-    element.click()
-
-except:
-     driver.quit()
-time.sleep(10)
-
-#find table
-table=driver.find_element_by_xpath('//*[@id="investments-table-object_wrapper"]/div[3]').text
-
-# print(table)
-
-time.sleep(5)
-n=1
-tablelist = [] 
-while(1): 
+if __name__ == "__main__":
+    dashboard = Dashboard(url=URL)
     try:
-
-        row1=driver.find_element_by_xpath('//*[@id="investments-table-object"]/tbody/tr['+str(n)+']/td[1]').text 
-        row2=driver.find_element_by_xpath('//*[@id="investments-table-object"]/tbody/tr['+str(n)+']/td[2]').text  
-        row3=driver.find_element_by_xpath('//*[@id="investments-table-object"]/tbody/tr['+str(n)+']/td[3]').text  
-        row4=driver.find_element_by_xpath('//*[@id="investments-table-object"]/tbody/tr['+str(n)+']/td[4]').text  
-        row5=driver.find_element_by_xpath('//*[@id="investments-table-object"]/tbody/tr['+str(n)+']/td[5]').text  
-        row6=driver.find_element_by_xpath('//*[@id="investments-table-object"]/tbody/tr['+str(n)+']/td[6]').text  
-        row7=driver.find_element_by_xpath('//*[@id="investments-table-object"]/tbody/tr['+str(n)+']/td[7]').text  
-
-        Table_data={ 'UII': row1,
-                    'Bureau': row2,
-                    'Investment Title': row3,
-                    'Total FY2021 Spending ($M)': row4,
-                    'Type': row5,
-                    'CIO Rating': row6,
-                    '# of Projects': row7,}
-        
-        tablelist.append(Table_data) 
-        tl = pd.DataFrame(tablelist)
-
-        n += 1
-    except NoSuchElementException: 
-        break
-          
-tl.to_csv('table.csv') 
-
-
-
-numberOfRows = len(driver.find_elements_by_xpath('//*[@id="investments-table-object"]/tbody/tr'))
-for iRow in range(numberOfRows):
-    element = WebDriverWait(driver, 30).until(
-                EC.presence_of_element_located((By.XPATH, '//*[@id="investments-table-object"]/tbody/tr['+str(iRow+1)+']/td[1]/a'))
-        )
-    element.click()
-    element = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.LINK_TEXT, "Download Business Case PDF"))
-        )
-    element.click()
-    driver.back()
-    time.sleep(10)
-    driver.back()
-    # print(numberOfRows)
+        dashboard.click_dive_in(BUTTON)
+        dashboard.find_agencies()
+        dashboard.agency_to_xls(XLS_AGENCY)
+        dashboard.open_agency(OPEN_AGENCY)
+        dashboard.investment_to_excel(XLS_TABLE)
+        dashboard.download_pdf()
+        dashboard.compare_pdf_with_title()
+    finally:
+        dashboard.close_all_browsers()

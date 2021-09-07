@@ -9,8 +9,8 @@ import pandas as pd
 import csv
 import re
 
-PATH="/usr/bin/chromedriver"
-driver = webdriver.Chrome(PATH)
+
+driver = webdriver.Chrome()
 driver.get("https://itdashboard.gov/")
 
 try:
